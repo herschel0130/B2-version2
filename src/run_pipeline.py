@@ -30,22 +30,95 @@ def ensure_output_dirs(base: Path) -> Path:
 
 
 def save_histogram(image: np.ndarray, out_path: Path, title: str) -> None:
-    """Save a pixel histogram plot."""
+    """Save a pixel histogram plot with robust percentile range and log y-axis."""
     finite = image[np.isfinite(image)]
+    plt.figure(figsize=(6, 4))
     if finite.size == 0:
         logging.warning("No finite pixels to plot histogram.")
-        return
-    plt.figure(figsize=(6, 4))
-    p_lo, p_hi = np.percentile(finite, [5, 99])
-    bins = 100
-    plt.hist(finite, bins=bins, range=(p_lo, p_hi), histtype="step", color="k")
-    plt.xlabel("Pixel value (counts)")
-    plt.ylabel("Number of pixels")
+        plt.text(0.5, 0.5, "No valid pixels", ha="center", va="center")
+    else:
+        p_lo, p_hi = np.percentile(finite, [1, 99])
+        bins = 120
+        plt.hist(
+            finite,
+            bins=bins,
+            range=(p_lo, p_hi),
+            histtype="stepfilled",
+            color="#607c8e",
+            edgecolor="#1f3b4d",
+            alpha=0.85,
+            linewidth=0.5,
+            density=False,
+        )
+        plt.yscale("log", nonpositive="clip")
+        median = np.median(finite)
+        plt.axvline(median, color="tab:red", linestyle="--", label="Median")
+        plt.axvline(np.percentile(finite, 16), color="#ffa500", linestyle=":", label="16/84")
+        plt.axvline(np.percentile(finite, 84), color="#ffa500", linestyle=":")
+        plt.legend(fontsize="small")
+        plt.xlim(p_lo, p_hi)
+        plt.xlabel("Pixel value (counts)")
+        plt.ylabel("Pixels (log scale)")
     plt.title(title)
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
     plt.close()
     logging.info("Saved histogram: %s", out_path)
+
+
+def save_scatter(
+    x: np.ndarray,
+    y: np.ndarray,
+    out_path: Path,
+    xlabel: str,
+    ylabel: str,
+    title: str,
+    y_line: Optional[float] = None,
+    empty_message: str = "No valid data",
+) -> None:
+    """Save scatter, handling empty data gracefully."""
+    plt.figure(figsize=(6, 4))
+    if x.size == 0 or y.size == 0:
+        plt.text(0.5, 0.5, empty_message, ha="center", va="center")
+    else:
+        plt.scatter(x, y, s=8, alpha=0.5, color="#274c77")
+        if y_line is not None:
+            plt.axhline(y_line, color="r", linestyle="--", linewidth=1)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    logging.info("Saved scatter: %s", out_path)
+
+
+def save_cumulative_counts(
+    mags: np.ndarray,
+    out_path: Path,
+    title: str,
+    conc_cut: Optional[float] = None,
+) -> None:
+    """Save cumulative counts plot even with no mags."""
+    plt.figure(figsize=(6, 4))
+    if mags.size == 0:
+        plt.text(0.5, 0.5, "No magnitudes to plot", ha="center", va="center")
+    else:
+        mags_sorted = np.sort(mags)
+        n_cum = np.arange(1, mags_sorted.size + 1)
+        plt.plot(mags_sorted, np.log10(n_cum), color="k", label="Measured")
+        m0 = np.median(mags_sorted)
+        n0 = np.interp(m0, mags_sorted, n_cum)
+        ref = n0 * 10 ** (0.6 * (mags_sorted - m0))
+        plt.plot(mags_sorted, np.log10(ref), "--", color="tab:red", label="slope 0.6")
+        plt.xlabel("Magnitude")
+        plt.ylabel("log10 N(<m)")
+        plt.legend(fontsize="small")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    logging.info("Saved counts plot: %s", out_path)
 
 
 def save_mask(image: np.ndarray, mask: np.ndarray, out_path: Path, title: str) -> None:
@@ -235,47 +308,35 @@ def main() -> None:
         json.dump(meta, f, indent=2)
 
     # Diagnostics: number counts (raw cumulative), sigma_m_vs_m, concentration_vs_m
-    mags = np.array([r["mag"] for r in rows], dtype=float)
-    mags = mags[np.isfinite(mags)]
-    if mags.size > 0:
-        bins = np.linspace(np.nanmin(mags), np.nanmax(mags), 30)
-        # Cumulative N(<m)
-        m_sorted = np.sort(mags)
-        n_cum = np.arange(1, m_sorted.size + 1)
-        plt.figure(figsize=(6, 4))
-        plt.plot(m_sorted, np.log10(n_cum), color="k")
-        # Reference slope 0.6 line anchored at median
-        m0 = np.median(m_sorted)
-        n0 = np.interp(m0, m_sorted, n_cum)
-        ref = n0 * 10 ** (0.6 * (m_sorted - m0))
-        plt.plot(m_sorted, np.log10(ref), "--", color="r", label="slope 0.6")
-        plt.xlabel("Magnitude")
-        plt.ylabel("log10 N(<m)")
-        plt.legend()
-        plt.tight_layout()
-        plt.savefig(diagnostics_dir / "counts_cumulative.png", dpi=150)
-        plt.close()
-
-        # sigma_m_vs_m
-        mag_errs = np.array([r["mag_err"] for r in rows], dtype=float)
-        plt.figure(figsize=(6, 4))
-        plt.scatter(mags, mag_errs[np.isfinite(mag_errs)], s=6, alpha=0.5)
-        plt.xlabel("Magnitude")
-        plt.ylabel("Magnitude error")
-        plt.tight_layout()
-        plt.savefig(diagnostics_dir / "sigma_m_vs_m.png", dpi=150)
-        plt.close()
-
-        # concentration_vs_m
-        conc = np.array([r["concentration"] for r in rows], dtype=float)
-        plt.figure(figsize=(6, 4))
-        plt.scatter(mags, conc[np.isfinite(conc)], s=6, alpha=0.5)
-        plt.axhline(float(args.star_concentration_cut), color="r", linestyle="--", linewidth=1)
-        plt.xlabel("Magnitude")
-        plt.ylabel("Concentration (m_3px - m_6px)")
-        plt.tight_layout()
-        plt.savefig(diagnostics_dir / "concentration_vs_m.png", dpi=150)
-        plt.close()
+    mag_arr = np.array([r["mag"] for r in rows], dtype=float)
+    mag_err_arr = np.array([r["mag_err"] for r in rows], dtype=float)
+    conc_arr = np.array([r["concentration"] for r in rows], dtype=float)
+    save_cumulative_counts(
+        mag_arr[np.isfinite(mag_arr)],
+        diagnostics_dir / "counts_cumulative.png",
+        title="Cumulative counts",
+    )
+    mask_sig = np.isfinite(mag_arr) & np.isfinite(mag_err_arr)
+    save_scatter(
+        mag_arr[mask_sig],
+        mag_err_arr[mask_sig],
+        diagnostics_dir / "sigma_m_vs_m.png",
+        xlabel="Magnitude",
+        ylabel="Magnitude error",
+        title="Magnitude uncertainties",
+        empty_message="No magnitude errors to plot",
+    )
+    mask_conc = np.isfinite(mag_arr) & np.isfinite(conc_arr)
+    save_scatter(
+        mag_arr[mask_conc],
+        conc_arr[mask_conc],
+        diagnostics_dir / "concentration_vs_m.png",
+        xlabel="Magnitude",
+        ylabel="Concentration (m3px - m6px)",
+        title="Concentration vs magnitude",
+        y_line=float(args.star_concentration_cut),
+        empty_message="No concentration data to plot",
+    )
 
     logging.info("Photometry and diagnostics completed.")
 
