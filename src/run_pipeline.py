@@ -1,14 +1,20 @@
 import argparse
+import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 
 from .background import estimate_background_and_noise
 from .io_utils import extract_subimage, get_header_float, parse_subimage_arg, read_fits
-from .segmentation import detect_threshold
+from .segmentation import (
+    compute_saturation_mask,
+    deblend_sources,
+    detect_threshold,
+)
 from .photometry import PhotometryParams, measure_source
 from .catalogue import write_catalog_csv
 import json
@@ -121,10 +127,21 @@ def save_cumulative_counts(
     logging.info("Saved counts plot: %s", out_path)
 
 
-def save_mask(image: np.ndarray, mask: np.ndarray, out_path: Path, title: str) -> None:
+def save_mask(
+    image: np.ndarray,
+    mask: np.ndarray,
+    out_path: Path,
+    title: str,
+    figsize: Tuple[int, int] = (6, 6),
+    dpi: int = 150,
+) -> None:
     """Save an image and mask overlay for diagnostics."""
-    p_lo, p_hi = np.percentile(image[np.isfinite(image)], [5, 99])
-    plt.figure(figsize=(6, 6))
+    finite = image[np.isfinite(image)]
+    if finite.size == 0:
+        p_lo, p_hi = 0.0, 1.0
+    else:
+        p_lo, p_hi = np.percentile(finite, [5, 99])
+    plt.figure(figsize=figsize, dpi=dpi)
     plt.imshow(image, origin="lower", cmap="gray", vmin=p_lo, vmax=p_hi)
     # Overlay mask
     overlay = np.zeros((*mask.shape, 4), dtype=float)
@@ -132,7 +149,7 @@ def save_mask(image: np.ndarray, mask: np.ndarray, out_path: Path, title: str) -
     plt.imshow(overlay, origin="lower")
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=dpi)
     plt.close()
     logging.info("Saved detection mask overlay: %s", out_path)
 
@@ -204,8 +221,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--star_concentration_cut",
         type=float,
-        default=0.5,
+        default=-0.1,
         help="Concentration C=m_3px-m_6px below which a source is flagged as probable star.",
+    )
+    parser.add_argument(
+        "--seeing_fwhm",
+        type=float,
+        default=4.0,
+        help="Expected seeing FWHM in pixels for star/galaxy classification.",
     )
     return parser.parse_args()
 
@@ -240,6 +263,17 @@ def main() -> None:
     if bbox is not None:
         logging.info("Using subimage bbox: x0=%d, x1=%d, y0=%d, y1=%d", *bbox)
 
+    # Saturation mask (diagnostic + detection exclusion)
+    saturation_mask = compute_saturation_mask(work_image)
+    save_mask(
+        work_image,
+        saturation_mask,
+        diagnostics_dir / "saturation_mask.png",
+        title="Saturation/Bloom mask",
+        figsize=(8, 8),
+        dpi=220,
+    )
+
     # Histogram diagnostic
     save_histogram(
         work_image,
@@ -258,6 +292,7 @@ def main() -> None:
         args.sigma_thresh,
         pre_smooth_sigma=args.pre_smooth_sigma,
         min_area=args.min_area,
+        exclude_mask=saturation_mask,
     )
     logging.info("Threshold used: %.6g ; detections: %d", thr, num_labels)
     save_mask(
@@ -265,7 +300,16 @@ def main() -> None:
         mask,
         diagnostics_dir / "detection_mask.png",
         title=f"Detections (thr={thr:.3f})",
+        figsize=(8, 8),
+        dpi=220,
     )
+
+    # Deblend and record FWHM, saturation overlaps
+    labeled, label_props = deblend_sources(
+        work_image, labeled, mask, saturation_mask, seeing_fwhm=args.seeing_fwhm
+    )
+    num_labels = int(np.max(labeled))
+    logging.info("After deblending, %d labels remain.", num_labels)
 
     # Photometry and catalogue writing
     params = PhotometryParams(
@@ -275,11 +319,20 @@ def main() -> None:
         star_concentration_cut=float(args.star_concentration_cut),
         edge_buffer_px=int(args.edge_buffer_px),
         detection_sigma_thresh=float(args.sigma_thresh),
+        seeing_fwhm=float(args.seeing_fwhm),
     )
     rows = []
     for label_id in range(1, num_labels + 1):
+        props = label_props.get(label_id, {})
         row = measure_source(
-            work_image, label_id, labeled, sigma, magzpt, magzrr, params
+            work_image,
+            label_id,
+            labeled,
+            sigma,
+            magzpt,
+            magzrr,
+            params,
+            source_attrs=props,
         )
         if row:
             rows.append(row)
@@ -300,6 +353,7 @@ def main() -> None:
             "annulus_rout_px": args.annulus_rout_px,
             "edge_buffer_px": args.edge_buffer_px,
             "star_concentration_cut": args.star_concentration_cut,
+            "seeing_fwhm": args.seeing_fwhm,
         },
         "image_shape": work_image.shape,
         "num_detections": len(rows),

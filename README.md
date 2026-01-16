@@ -53,7 +53,8 @@ python -m src.run_pipeline \
   --annulus_rin_px 8 \
   --annulus_rout_px 12 \
   --edge_buffer_px 10 \
-  --star_concentration_cut 0.5
+  --star_concentration_cut -0.1 \
+  --seeing_fwhm 4.0
 ```
 
 Notes:
@@ -67,22 +68,41 @@ Notes:
   - `outputs/catalog_ap6.csv` (schema below)
   - `outputs/catalog_meta.json` (MAGZPT/MAGZRR, parameters, image shape)
 - Diagnostics (`outputs/diagnostics/`):
+  - `saturation_mask.png`: Saturation/bloom mask derived from counts >50k (dilated) to flag artifacts.
   - `pixel_histogram.png`: Pixel histogram (robust range)
   - `detection_mask.png`: Threshold mask overlay
   - `counts_cumulative.png`: Cumulative counts N(<m) with slope 0.6 reference
   - `sigma_m_vs_m.png`: Magnitude errors vs magnitude
   - `concentration_vs_m.png`: Concentration vs magnitude (star cut overlay)
 
+### Plotting notes
+
+- `saturation_mask.png` and `detection_mask.png` are rendered at 8″×8″ with 220 dpi so the masked/artifact regions are easier to inspect.
+- The concentration vs. magnitude plot draws the horizontal line at the `--star_concentration_cut` value you supplied (default −0.1), keeping the visual threshold aligned with the catalogue filter.
+
+### New diagnostics
+
+- `saturation_mask.png` visualizes pixels excluded from detection due to very high counts (saturation/bloom regions).
+- All diagnostics are generated even when the corresponding stats are missing; placeholder text explains empty plots.
+
+### New features
+
+- **Saturation & artifact masking:** Pixels above ~50k counts are masked (plus a generous dilation) and excluded from detection/photometry. The mask is saved to `outputs/diagnostics/saturation_mask.png` and sources touching this area set bit 4 in their flags.
+- **De-blending via Gaussian fitting:** Each connected component is inspected for multiple peaks. When a multi-component Gaussian fit reduces the residual significantly, the mask is split, and the new components appear as separate rows with the parent component count recorded in `deblend_components`.
+- **FWHM-driven star/galaxy separation:** Each source stores `fwhm_pix`. Objects consistent with the `--seeing_fwhm` value and compact concentration are flagged as probable stars (bit 64), while extended/multi-component sources set the bright-extended flag (bit 32).
+
 ### Parameters (key)
 
-- Detection:
-  - `--sigma_thresh` (default 1.5): threshold in σ above background
-  - `--pre_smooth_sigma` (default 1.0): Gaussian pre-smoothing (px)
-  - `--min_area` (default 10): minimum connected pixels
-- Photometry:
-  - `--ap_radius_px` (default 6), `--annulus_rin_px` (8), `--annulus_rout_px` (12)
-  - `--edge_buffer_px` (default 10): flag sources near edge
-  - `--star_concentration_cut` (default 0.5): probable star threshold on C = m_3px − m_6px
+### Detection parameters
+- `--sigma_thresh` (default 1.5): threshold in σ above background.
+- `--pre_smooth_sigma` (default 1.0): Gaussian pre-smoothing in pixels.
+- `--min_area` (default 10): minimum connected pixels to keep a detection.
+- `--seeing_fwhm` (default 4.0): expected point-source FWHM applied to FWHM-based star/galaxy flags.
+
+### Photometry parameters
+- `--ap_radius_px` (default 6), `--annulus_rin_px` (8), `--annulus_rout_px` (12)
+- `--edge_buffer_px` (default 10): flag sources near the image edge.
+- `--star_concentration_cut` (default -0.1): concentration C = m_3px − m_6px threshold for marking a source as a probable star (on top of the FWHM test).
 
 ### Catalogue schema
 
@@ -98,6 +118,7 @@ Recommended:
 - `n_annulus_valid` (int)
 - `flux_ap3`, `flux_ap6`, `mag_ap3`, `mag_ap6` (float)
 - `concentration` (float), `is_prob_star` (bool)
+- `fwhm_pix`, `deblend_components`, `touches_saturation`
 
 Flags:
 - 1 blended, 2 near edge, 4 saturated-mask overlap (not used here),
@@ -107,7 +128,8 @@ Flags:
 ### Development tips
 
 - Start with a subimage (`--subimage x0,x1,y0,y1`) for speed.
-- Adjust `--sigma_thresh` and `--min_area` to balance completeness and purity.
+- Adjust `--sigma_thresh`, `--min_area`, and `--seeing_fwhm` to balance completeness and galaxy/star cleaning.
+- Inspect `outputs/diagnostics/saturation_mask.png` to understand how many pixels are masked prior to detection.
 - Logs are written to stdout; increase verbosity by adjusting `logging.basicConfig` in `src/run_pipeline.py`.
 
 ### Testing and synthetic data (roadmap)

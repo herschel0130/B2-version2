@@ -13,11 +13,12 @@ class PhotometryParams:
     r_ap_pix: float = 6.0
     r_in_pix: float = 8.0
     r_out_pix: float = 12.0
-    star_concentration_cut: float = 0.5
+    star_concentration_cut: float = -0.1
     edge_buffer_px: int = 10
     sigma_clip: float = 3.0
     min_annulus_valid: int = 50
     detection_sigma_thresh: float = 1.5
+    seeing_fwhm: float = 4.0
 
 
 def make_circular_mask(shape: Tuple[int, int], cx: float, cy: float, r: float) -> np.ndarray:
@@ -158,12 +159,17 @@ def measure_source(
     magzpt: Optional[float],
     magzrr: Optional[float],
     params: PhotometryParams,
+    source_attrs: Optional[Dict[str, float]] = None,
 ) -> Dict:
     """Measure catalogue quantities for one label."""
     source_mask = labeled == label_id
     if not np.any(source_mask):
         return {}
     cy, cx = ndi.center_of_mass(source_mask.astype(float))
+    fwhm_px = float(source_attrs.get("fwhm_px", np.nan)) if source_attrs else float("nan")
+    parent_components = int(source_attrs.get("parent_components", 1)) if source_attrs else 1
+    touches_saturation = bool(source_attrs.get("touches_saturation", False)) if source_attrs else False
+
     # Edge flag
     h, w = image.shape
     edge_flag = 2 if (cx < params.edge_buffer_px or cy < params.edge_buffer_px or (w - cx) < params.edge_buffer_px or (h - cy) < params.edge_buffer_px) else 0
@@ -197,13 +203,28 @@ def measure_source(
     flux_ap6 = sum_ap6 - bkg_perpix_for_sum * n_ap6
     mag_ap6, _ = compute_magnitude(flux_ap6, compute_flux_err(n_ap6, sigma_used, flux_ap6, None), magzpt, magzrr)
     concentration = float(mag_ap3 - mag_ap6) if (np.isfinite(mag_ap3) and np.isfinite(mag_ap6)) else float("nan")
-    is_prob_star = bool(np.isfinite(concentration) and concentration < params.star_concentration_cut)
+    is_star_by_fwhm = np.isfinite(fwhm_px) and fwhm_px <= params.seeing_fwhm * 1.2
+    is_prob_star = bool(
+        is_star_by_fwhm and np.isfinite(concentration) and concentration < params.star_concentration_cut
+    )
     star_flag = 64 if is_prob_star else 0
 
-    # Post-measurement S/N below detection threshold
+    extended_flag = 32 if (
+        parent_components > 1 or (np.isfinite(fwhm_px) and fwhm_px > params.seeing_fwhm * 1.5)
+    ) else 0
+    saturation_flag = 4 if touches_saturation else 0
     sn_flag = 128 if (np.isfinite(snr_ap) and snr_ap < params.detection_sigma_thresh) else 0
 
-    flags = blended_flag | edge_flag | annulus_flag | grad_flag | star_flag | sn_flag
+    flags = (
+        blended_flag
+        | edge_flag
+        | annulus_flag
+        | grad_flag
+        | star_flag
+        | extended_flag
+        | saturation_flag
+        | sn_flag
+    )
 
     return {
         "id": int(label_id),
@@ -226,6 +247,9 @@ def measure_source(
         "mag_ap6": float(mag_ap6),
         "concentration": float(concentration),
         "is_prob_star": bool(is_prob_star),
+        "fwhm_pix": fwhm_px,
+        "deblend_components": int(parent_components),
+        "touches_saturation": bool(touches_saturation),
     }
 
 

@@ -27,6 +27,9 @@ CATALOG_COLUMNS_RECOMMENDED: List[str] = [
     "mag_ap6",
     "concentration",
     "is_prob_star",
+    "fwhm_pix",
+    "deblend_components",
+    "touches_saturation",
 ]
 
 

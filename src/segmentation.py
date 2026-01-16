@@ -1,7 +1,10 @@
 import logging
-from typing import Optional, Tuple
+import warnings
+from typing import Dict, Optional, Tuple
 
 import numpy as np
+from astropy.modeling import fitting, models
+from astropy.modeling.core import Model as AstropyModel
 from scipy import ndimage as ndi
 
 
@@ -12,6 +15,7 @@ def detect_threshold(
     sigma_thresh: float,
     pre_smooth_sigma: float = 0.0,
     min_area: int = 0,
+    exclude_mask: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, int, float]:
     """Detect sources by thresholding and connected-component labeling.
 
@@ -43,6 +47,8 @@ def detect_threshold(
     # Basic threshold
     mask = work > threshold_value
     # Morphological clean-up: remove very small or isolated pixels
+    if exclude_mask is not None:
+        mask &= ~exclude_mask
     mask = ndi.binary_opening(mask, structure=np.ones((3, 3), dtype=bool))
     mask = ndi.binary_closing(mask, structure=np.ones((3, 3), dtype=bool))
     # Label connected components
@@ -58,4 +64,156 @@ def detect_threshold(
     logging.info("Detected %d connected components.", num_labels)
     return mask, labeled, num_labels, float(threshold_value)
 
+
+def compute_saturation_mask(
+    image: np.ndarray, threshold: float = 10000.0, dilation: int = 12
+) -> np.ndarray:
+    """Mask saturated/blooming pixels that exceed the linearity limit."""
+
+    mask = image >= threshold
+    if dilation > 0:
+        structure = np.ones((dilation * 2 + 1, dilation * 2 + 1), dtype=bool)
+        mask = ndi.binary_dilation(mask, structure=structure)
+    return mask
+
+
+def _find_local_peaks(patch: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    data = np.where(mask, patch, np.min(patch))
+    maxima = ndi.maximum_filter(data, size=3)
+    peaks = (data == maxima) & mask
+    coords = np.column_stack(np.nonzero(peaks))
+    if coords.size == 0:
+        return coords
+    brightness = data[coords[:, 0], coords[:, 1]]
+    order = np.argsort(brightness)[::-1]
+    coords = coords[order]
+    return coords[: min(coords.shape[0], 5)]
+
+
+def _fit_gaussians(
+    patch: np.ndarray, mask: np.ndarray, centers: np.ndarray
+) -> Tuple[float, Optional[AstropyModel]]:
+    if mask.sum() == 0:
+        return float("inf"), None
+
+    ny, nx = patch.shape
+    y_grid, x_grid = np.mgrid[:ny, :nx]
+    background = float(np.median(patch[mask]))
+    model: AstropyModel = models.Const2D(amplitude=background)
+    for center in centers:
+        y0, x0 = center
+        amplitude = float(max(patch[int(round(y0)), int(round(x0))] - background, 0.0))
+        gauss = models.Gaussian2D(
+            amplitude=amplitude,
+            x_mean=x0,
+            y_mean=y0,
+            x_stddev=1.5,
+            y_stddev=1.5,
+        )
+        model += gauss
+
+    fitter = fitting.LevMarLSQFitter()
+    mask_float = mask.astype(float)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fitted = fitter(model, x_grid, y_grid, patch, weights=mask_float)
+    except Exception:
+        return float("inf"), None
+
+    residual = ((patch - fitted(x_grid, y_grid)) * mask_float) ** 2
+    return float(np.sum(residual)), fitted
+
+
+def _split_mask_by_peaks(
+    mask: np.ndarray, centers: np.ndarray, offset_y: int, offset_x: int
+) -> np.ndarray:
+    yy, xx = np.nonzero(mask)
+    if yy.size == 0:
+        return np.zeros_like(mask, dtype=int)
+    coords = np.column_stack((yy + offset_y, xx + offset_x))
+    peak_coords = centers + np.array([[offset_y, offset_x]])
+    dist = np.sum((coords[:, None, :] - peak_coords[None, :, :]) ** 2, axis=-1)
+    assigned = np.argmin(dist, axis=1)
+    result = np.zeros_like(mask, dtype=int)
+    result[yy, xx] = assigned + 1
+    return result
+
+
+def _compute_fwhm(image: np.ndarray, mask: np.ndarray) -> float:
+    yy, xx = np.nonzero(mask)
+    if yy.size == 0:
+        return float("nan")
+    vals = image[yy, xx]
+    total = np.sum(vals)
+    if total <= 0 or not np.isfinite(total):
+        return float("nan")
+    x_mean = np.sum(vals * xx) / total
+    y_mean = np.sum(vals * yy) / total
+    var_x = np.sum(vals * (xx - x_mean) ** 2) / total
+    var_y = np.sum(vals * (yy - y_mean) ** 2) / total
+    rms = np.sqrt(max(var_x, 1e-6) + max(var_y, 1e-6)) / np.sqrt(2)
+    return 2.355 * rms
+
+
+def deblend_sources(
+    image: np.ndarray,
+    labeled: np.ndarray,
+    detection_mask: np.ndarray,
+    saturation_mask: np.ndarray,
+    seeing_fwhm: float = 4.0,
+) -> Tuple[np.ndarray, Dict[int, Dict[str, float]]]:
+    """Split multi-peaked detections and record FWHM/flags."""
+
+    component_map: Dict[int, int] = {}
+    original_labels = np.unique(labeled)
+    next_label = int(labeled.max()) + 1
+    slices = ndi.find_objects(labeled)
+    for label_id in original_labels:
+        if label_id == 0:
+            continue
+        slc = slices[label_id - 1] if label_id - 1 < len(slices) else None
+        if slc is None:
+            continue
+        obj_mask = (labeled[slc] == label_id)
+        if not obj_mask.any():
+            continue
+        patch = image[slc]
+        peaks = _find_local_peaks(patch, obj_mask)
+        if peaks.shape[0] <= 1:
+            component_map[label_id] = 1
+            continue
+        res_single, _ = _fit_gaussians(patch, obj_mask, peaks[[0]])
+        res_multi, _ = _fit_gaussians(patch, obj_mask, peaks)
+        if res_multi < res_single * 0.7:
+            labeled[slc][obj_mask] = 0
+            split = _split_mask_by_peaks(
+                obj_mask,
+                peaks,
+                offset_y=slc[0].start,
+                offset_x=slc[1].start,
+            )
+            num_components = len(peaks)
+            for comp_idx in range(1, num_components + 1):
+                comp_mask = split == comp_idx
+                if not comp_mask.any():
+                    continue
+                labeled[slc][comp_mask] = next_label
+                component_map[next_label] = num_components
+                next_label += 1
+            continue
+        component_map[label_id] = 1
+
+    final_props: Dict[int, Dict[str, float]] = {}
+    final_labels = np.unique(labeled)
+    for label_id in final_labels:
+        if label_id == 0:
+            continue
+        source_mask = labeled == label_id
+        final_props[label_id] = {
+            "fwhm_px": _compute_fwhm(image, source_mask),
+            "parent_components": float(component_map.get(label_id, 1)),
+            "touches_saturation": float(np.any(source_mask & saturation_mask)),
+        }
+    return labeled, final_props
 
