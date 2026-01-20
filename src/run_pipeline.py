@@ -264,7 +264,10 @@ def main() -> None:
         logging.info("Using subimage bbox: x0=%d, x1=%d, y0=%d, y1=%d", *bbox)
 
     # Saturation mask (diagnostic + detection exclusion)
-    saturation_mask = compute_saturation_mask(work_image)
+    global_max = float(np.nanmax(work_image))
+    sat_thresh = min(50000.0, global_max * 0.9)
+    logging.info("Using dynamic saturation threshold: %.3f", sat_thresh)
+    saturation_mask = compute_saturation_mask(work_image, threshold=sat_thresh)
     save_mask(
         work_image,
         saturation_mask,

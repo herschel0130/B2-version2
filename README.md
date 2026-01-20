@@ -75,6 +75,8 @@ Notes:
   - `sigma_m_vs_m.png`: Magnitude errors vs magnitude
   - `concentration_vs_m.png`: Concentration vs magnitude (star cut overlay)
 
+- The saturation mask now uses a small horizontal stretch (~12 px) and a very long vertical stretch (up to the whole image height) so bleeding lines are fully covered, and it is drawn taller (6″×12″) for easier visual verification.
+
 ### Plotting notes
 
 - `saturation_mask.png` and `detection_mask.png` are rendered at 8″×8″ with 220 dpi so the masked/artifact regions are easier to inspect.
@@ -88,6 +90,9 @@ Notes:
 ### New features
 
 - **Saturation & artifact masking:** Pixels above ~50k counts are masked (plus a generous dilation) and excluded from detection/photometry. The mask is saved to `outputs/diagnostics/saturation_mask.png` and sources touching this area set bit 4 in their flags.
+- The mask uses a narrow horizontal extension (~4 px) but a long vertical stretch (~40 px) to track bleeding lines without eroding legitimate galaxies.
+- The threshold is adaptive—set to `min(50000, 0.95×max_value)`—and the runtime prints the global count maximum for traceability.
+- We also apply a 3×3 `maximum_filter` before thresholding so clustered bright pixels aren’t missed.
 - **De-blending via Gaussian fitting:** Each connected component is inspected for multiple peaks. When a multi-component Gaussian fit reduces the residual significantly, the mask is split, and the new components appear as separate rows with the parent component count recorded in `deblend_components`.
 - **FWHM-driven star/galaxy separation:** Each source stores `fwhm_pix`. Objects consistent with the `--seeing_fwhm` value and compact concentration are flagged as probable stars (bit 64), while extended/multi-component sources set the bright-extended flag (bit 32).
 
@@ -103,6 +108,7 @@ Notes:
 - `--ap_radius_px` (default 6), `--annulus_rin_px` (8), `--annulus_rout_px` (12)
 - `--edge_buffer_px` (default 10): flag sources near the image edge.
 - `--star_concentration_cut` (default -0.1): concentration C = m_3px − m_6px threshold for marking a source as a probable star (on top of the FWHM test).
+- Local annuli now only mask other labels, so source A’s own wings remain available for background estimation while neighbors stay excluded.
 
 ### Catalogue schema
 

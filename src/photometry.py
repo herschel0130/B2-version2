@@ -178,7 +178,8 @@ def measure_source(
     neighbor_labels = np.unique(labeled[dil])
     blended_flag = 1 if np.any((neighbor_labels > 0) & (neighbor_labels != label_id)) else 0
     # Exclude mask for annulus: dilated segmentation by 2 px
-    exclude = ndi.binary_dilation(labeled > 0, structure=np.ones((5, 5), bool))
+    other_sources = labeled != label_id
+    exclude = ndi.binary_dilation(other_sources, structure=np.ones((5, 5), bool))
     ann_mask = make_annulus_mask(image.shape, cx, cy, params.r_in_pix, params.r_out_pix)
     bkg_perpix, sigma_local, n_valid, reject_frac, grad_flag = compute_local_background(
         image, ann_mask, exclude, params.sigma_clip, params.min_annulus_valid

@@ -66,15 +66,35 @@ def detect_threshold(
 
 
 def compute_saturation_mask(
-    image: np.ndarray, threshold: float = 10000.0, dilation: int = 12
+    image: np.ndarray, threshold: float = 50000.0
 ) -> np.ndarray:
-    """Mask saturated/blooming pixels that exceed the linearity limit."""
+    """精准屏蔽饱和区：垂直线仅覆盖受损像素列，核心仅覆盖饱和团块。"""
+    
+    # 1. 识别饱和种子点 (依据实验指南建议：>50,000 为非线性区) [cite: 80]
+    seeds = image >= threshold
+    if not np.any(seeds):
+        return np.zeros_like(image, dtype=bool)
 
-    mask = image >= threshold
-    if dilation > 0:
-        structure = np.ones((dilation * 2 + 1, dilation * 2 + 1), dtype=bool)
-        mask = ndi.binary_dilation(mask, structure=structure)
-    return mask
+    # 2. 核心掩模 (Core Mask): 仅针对饱和团块进行小范围圆形/方形扩张
+    # 11x11 的结构足以盖住大多数饱和星核，而不会过度横向扩张
+    core_mask = ndi.binary_dilation(seeds, structure=np.ones((11, 11), dtype=bool))
+
+    # 3. 溢出线掩模 (Spike Mask): 专门针对垂直电荷溢出 
+    # 我们只寻找那些有大量饱和像素的列
+    col_counts = np.sum(seeds, axis=0)
+    # 只有当一列中有超过 10 个像素饱和时，才判定为 bleeding line 
+    spike_cols = np.where(col_counts > 10)[0]
+    
+    spike_mask = np.zeros_like(image, dtype=bool)
+    if spike_cols.size > 0:
+        # 仅对这些饱和列及其左右各 1 像素进行屏蔽（总宽度 3 像素）
+        # 这能精准覆盖白线，而不伤及周围星系 [cite: 150]
+        for c in spike_cols:
+            c_min = max(0, c - 1)
+            c_max = min(image.shape[1] - 1, c + 1)
+            spike_mask[:, c_min : c_max + 1] = True
+
+    return core_mask | spike_mask
 
 
 def _find_local_peaks(patch: np.ndarray, mask: np.ndarray) -> np.ndarray:
