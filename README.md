@@ -72,6 +72,9 @@ Notes:
   - `pixel_histogram.png`: Pixel histogram (robust range)
   - `detection_mask.png`: Threshold mask overlay
   - `counts_cumulative.png`: Cumulative counts N(<m) with slope 0.6 reference
+  - `counts_normalized.png`: Cumulative counts per square degree (deg⁻²) with Euclidean slope reference
+  - `counts_normalized_fit.png`: Linear fit to the normalized cumulative counts with Poisson error bars and slope uncertainty.
+  - `counts_linear_fit.png`: Linear fit to the cumulative counts with Poisson error bars and slope uncertainty.
   - `sigma_m_vs_m.png`: Magnitude errors vs magnitude
   - `concentration_vs_m.png`: Concentration vs magnitude (star cut overlay)
 
@@ -79,6 +82,8 @@ Notes:
 
 - `saturation_mask.png` and `detection_mask.png` are rendered at 8″×8″ with 220 dpi so the masked/artifact regions are easier to inspect.
 - The concentration vs. magnitude plot draws the horizontal line at the `--star_concentration_cut` value you supplied (default −0.1), keeping the visual threshold aligned with the catalogue filter.
+- `counts_normalized.png` shows the survey depth normalized to square degrees (deg⁻²), allowing for direct comparison with literature.
+- `counts_normalized_fit.png` and `counts_linear_fit.png` provide an automated slope estimate and its uncertainty for the Euclidean range of the cumulative counts.
 
 ### New diagnostics
 

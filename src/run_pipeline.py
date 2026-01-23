@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 from typing import Optional, Tuple
 
-import json
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -17,7 +16,6 @@ from .segmentation import (
 )
 from .photometry import PhotometryParams, measure_source
 from .catalogue import write_catalog_csv
-import json
 from scipy import ndimage as ndi # 用于统计 mask 中的源数量
 from skimage import measure      # 用于提取红色轮廓线
 
@@ -127,6 +125,144 @@ def save_cumulative_counts(
     plt.savefig(out_path, dpi=150)
     plt.close()
     logging.info("Saved counts plot: %s", out_path)
+
+
+def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
+    """Cumulative counts with Poisson error bars and a linear fit to the Euclidean range."""
+    plt.figure(figsize=(6, 4))
+    if mags.size < 5:
+        plt.text(0.5, 0.5, "Insufficient data for fit", ha="center", va="center")
+    else:
+        mags_sorted = np.sort(mags)
+        n_cum = np.arange(1, mags_sorted.size + 1)
+        log_n = np.log10(n_cum)
+        
+        # Poisson error: sigma(N) = sqrt(N). Error in log10(N) is approx 0.434 * sigma(N) / N
+        err_log_n = 0.434 * np.sqrt(n_cum) / n_cum
+        
+        plt.errorbar(mags_sorted, log_n, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
+        
+        # Fit range: from bright end up to where completeness begins to drop (rollover)
+        idx_start = int(0.05 * mags_sorted.size)
+        idx_end = int(0.65 * mags_sorted.size)
+        
+        fit_m = mags_sorted[idx_start:idx_end]
+        fit_log_n = log_n[idx_start:idx_end]
+        
+        if fit_m.size > 2:
+            # Use cov=True to get uncertainties
+            coeffs, cov = np.polyfit(fit_m, fit_log_n, 1, cov=True)
+            slope, intercept = coeffs
+            slope_err = np.sqrt(cov[0, 0])
+            
+            m_range = np.linspace(mags_sorted.min(), mags_sorted.max(), 100)
+            plt.plot(m_range, slope * m_range + intercept, 'r--', 
+                     label=f'Linear Fit (slope={slope:.3f}±{slope_err:.3f})')
+            plt.axvspan(fit_m.min(), fit_m.max(), color='tab:blue', alpha=0.1, label='Fit range')
+        
+        plt.xlabel("Magnitude")
+        plt.ylabel("log10 N(<m)")
+        plt.legend(fontsize="small")
+    
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    logging.info("Saved counts fit plot: %s", out_path)
+
+
+def save_counts_normalized_fit(mags: np.ndarray, area_deg2: float, out_path: Path, title: str) -> None:
+    """Cumulative counts per deg2 with Poisson error bars and a linear fit."""
+    plt.figure(figsize=(6, 4))
+    if mags.size < 5 or area_deg2 <= 0:
+        plt.text(0.5, 0.5, "Insufficient data or zero area", ha="center", va="center")
+    else:
+        mags_sorted = np.sort(mags)
+        n_cum = np.arange(1, mags_sorted.size + 1)
+        # Normalize to per square degree
+        n_deg2 = n_cum / area_deg2
+        log_n_deg2 = np.log10(n_deg2)
+        
+        # Poisson error propagation to log10(N/Area)
+        # sigma(log10(N/A)) = 0.434 * sigma(N/A) / (N/A) = 0.434 * (sqrt(N)/A) / (N/A) = 0.434 / sqrt(N)
+        err_log_n = 0.434 / np.sqrt(n_cum)
+        
+        plt.errorbar(mags_sorted, log_n_deg2, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
+        
+        # Fit range
+        idx_start = int(0.05 * mags_sorted.size)
+        idx_end = int(0.65 * mags_sorted.size)
+        
+        fit_m = mags_sorted[idx_start:idx_end]
+        fit_log_n = log_n_deg2[idx_start:idx_end]
+        
+        if fit_m.size > 2:
+            coeffs, cov = np.polyfit(fit_m, fit_log_n, 1, cov=True)
+            slope, intercept = coeffs
+            slope_err = np.sqrt(cov[0, 0])
+            
+            m_range = np.linspace(mags_sorted.min(), mags_sorted.max(), 100)
+            plt.plot(m_range, slope * m_range + intercept, 'r--', 
+                     label=f'Linear Fit (slope={slope:.3f}±{slope_err:.3f})')
+            plt.axvspan(fit_m.min(), fit_m.max(), color='tab:blue', alpha=0.1, label='Fit range')
+        
+        plt.xlabel("Magnitude")
+        plt.ylabel("log10 N(<m) [deg⁻²]")
+        plt.legend(fontsize="small")
+        
+        plt.text(0.05, 0.95, f"Effective Area: {area_deg2:.4f} deg²", 
+                 transform=plt.gca().transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+    logging.info("Saved normalized counts fit plot: %s", out_path)
+
+
+
+def save_counts_normalized(mags: np.ndarray, area_deg2: float, out_path: Path, title: str) -> None:
+    """Cumulative counts per square degree with Euclidean slope comparison."""
+    plt.figure(figsize=(6, 4))
+    if mags.size == 0 or area_deg2 <= 0:
+        plt.text(0.5, 0.5, "Insufficient data or zero area", ha="center", va="center")
+    else:
+        mags_sorted = np.sort(mags)
+        n_cum = np.arange(1, mags_sorted.size + 1)
+        # Normalize to per square degree
+        n_deg2 = n_cum / area_deg2
+        
+        plt.plot(mags_sorted, np.log10(n_deg2), 'k-', label='Measured (per deg²)')
+        
+        # Poisson uncertainty band on the normalized counts
+        sigma_n = np.sqrt(n_cum)
+        lo = np.log10(np.maximum(n_cum - sigma_n, 1.0) / area_deg2)
+        hi = np.log10((n_cum + sigma_n) / area_deg2)
+        plt.fill_between(mags_sorted, lo, hi, color='k', alpha=0.15, label='Poisson uncertainty')
+
+        # Euclidean reference line (slope 0.6)
+        # Anchor the reference line at the bright end (e.g., 20th percentile)
+        idx_ref = int(0.2 * mags_sorted.size)
+        m_ref = mags_sorted[idx_ref]
+        n_ref = n_deg2[idx_ref]
+        ref_line = n_ref * 10**(0.6 * (mags_sorted - m_ref))
+        plt.plot(mags_sorted, np.log10(ref_line), 'r--', alpha=0.8, label='Euclidean slope (0.6)')
+
+        plt.xlabel("Magnitude")
+        plt.ylabel("log10 N(<m) [deg⁻²]")
+        plt.legend(fontsize="small", loc='lower right')
+        
+        # Add effective area to the plot
+        plt.text(0.05, 0.95, f"Effective Area: {area_deg2:.4f} deg²", 
+                 transform=plt.gca().transAxes, verticalalignment='top',
+                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+    
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+    logging.info("Saved normalized counts plot: %s", out_path)
 
 
 def save_mask(
@@ -319,6 +455,14 @@ def main() -> None:
         threshold_low=detection_thr, 
         pre_smooth_sigma=args.pre_smooth_sigma
     )
+    
+    # Calculate effective area in square degrees
+    # Pixel scale: 0.258" / pixel (from B2_pipeline_spec.md)
+    pixel_scale_arcsec = 0.258
+    unmasked_pixels = np.sum(~saturation_mask)
+    area_deg2 = float(unmasked_pixels * (pixel_scale_arcsec / 3600.0)**2)
+    logging.info("Effective Area: %.6f deg² (%d unmasked pixels)", area_deg2, unmasked_pixels)
+
     save_mask(
         work_image,
         saturation_mask,
@@ -429,6 +573,7 @@ def main() -> None:
         },
         "image_shape": work_image.shape,
         "num_detections": len(rows),
+        "effective_area_deg2": area_deg2,
     }
     with (out_dir / "catalog_meta.json").open("w") as f:
         json.dump(meta, f, indent=2)
@@ -437,10 +582,29 @@ def main() -> None:
     mag_arr = np.array([r["mag"] for r in rows], dtype=float)
     mag_err_arr = np.array([r["mag_err"] for r in rows], dtype=float)
     conc_arr = np.array([r["concentration"] for r in rows], dtype=float)
+    
+    mags_finite = mag_arr[np.isfinite(mag_arr)]
     save_cumulative_counts(
-        mag_arr[np.isfinite(mag_arr)],
+        mags_finite,
         diagnostics_dir / "counts_cumulative.png",
         title="Cumulative counts",
+    )
+    save_counts_normalized(
+        mags_finite,
+        area_deg2,
+        diagnostics_dir / "counts_normalized.png",
+        title="Cumulative Counts per Square Degree",
+    )
+    save_counts_normalized_fit(
+        mags_finite,
+        area_deg2,
+        diagnostics_dir / "counts_normalized_fit.png",
+        title="Normalized Cumulative Counts Linear Fit",
+    )
+    save_counts_fit(
+        mags_finite,
+        diagnostics_dir / "counts_linear_fit.png",
+        title="Cumulative Counts Linear Fit",
     )
     mask_sig = np.isfinite(mag_arr) & np.isfinite(mag_err_arr)
     save_scatter(
