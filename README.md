@@ -110,7 +110,7 @@ Required:
 - `id` (int), `x`, `y` (float): centroid in pixels
 - `flux_counts`, `flux_err` (float): background-subtracted aperture sum and 1σ error
 - `bkg_perpix` (float): annulus background (counts/pixel)
-- `mag`, `mag_err` (float): calibrated magnitude and 1σ uncertainty (incl. zero-point)
+- `mag`, `mag_err` (float): calibrated magnitude and 1σ uncertainty (incl. zero-point and EXPTIME normalization)
 - `flags` (int): bitmask
 
 Recommended:
@@ -119,6 +119,11 @@ Recommended:
 - `flux_ap3`, `flux_ap6`, `mag_ap3`, `mag_ap6` (float)
 - `concentration` (float), `is_prob_star` (bool)
 - `fwhm_pix`, `deblend_components`, `touches_saturation`
+
+### Calibration details
+- **Exposure Time**: If `EXPTIME` is found in the FITS header, the pipeline uses: `m = ZP - 2.5 * log10(flux / EXPTIME)`.
+- **Gain**: If `GAIN` is found, it is used to refine `flux_err` (Poisson noise contribution from the source).
+- **Error Propagation**: `mag_err = sqrt( magzrr^2 + (1.0857 * flux_err / flux_counts)^2 )`.
 
 Flags:
 - 1 blended, 2 near edge, 4 saturated-mask overlap (not used here),

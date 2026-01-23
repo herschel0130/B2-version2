@@ -18,6 +18,8 @@ from .segmentation import (
 from .photometry import PhotometryParams, measure_source
 from .catalogue import write_catalog_csv
 import json
+from scipy import ndimage as ndi # 用于统计 mask 中的源数量
+from skimage import measure      # 用于提取红色轮廓线
 
 
 def setup_logging() -> None:
@@ -132,26 +134,62 @@ def save_mask(
     mask: np.ndarray,
     out_path: Path,
     title: str,
-    figsize: Tuple[int, int] = (6, 6),
-    dpi: int = 150,
+    figsize: Tuple[int, int] = (12, 10),
+    dpi: int = 220,
 ) -> None:
-    """Save an image and mask overlay for diagnostics."""
+    """保存带有 Mask 轮廓和统计信息的诊断图，匹配 smart_mask_combiner 风格。"""
     finite = image[np.isfinite(image)]
     if finite.size == 0:
         p_lo, p_hi = 0.0, 1.0
     else:
-        p_lo, p_hi = np.percentile(finite, [5, 99])
-    plt.figure(figsize=figsize, dpi=dpi)
-    plt.imshow(image, origin="lower", cmap="gray", vmin=p_lo, vmax=p_hi)
-    # Overlay mask
-    overlay = np.zeros((*mask.shape, 4), dtype=float)
-    overlay[mask, :] = np.array([1.0, 0.0, 0.0, 0.35])  # red with alpha
-    plt.imshow(overlay, origin="lower")
-    plt.title(title)
+        # 使用更宽的百分比范围进行可视化，类似于 ZScale 效果
+        p_lo, p_hi = np.percentile(finite, [5, 99.5])
+    
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    
+    # 1. 显示原始灰度图
+    im = ax.imshow(
+        image, 
+        origin="lower", 
+        cmap="gray", 
+        vmin=p_lo, 
+        vmax=p_hi, 
+        interpolation='nearest'
+    )
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_xlabel('X (pixels)', fontsize=12)
+    ax.set_ylabel('Y (pixels)', fontsize=12)
+    
+    # 2. 绘制 Mask 的红色轮廓
+    # find_contours 返回 [y, x] 坐标对
+    contours = measure.find_contours(mask.astype(np.uint8), level=0.5)
+    for contour in contours:
+        ax.plot(contour[:, 1], contour[:, 0], color='red', linewidth=1.5, alpha=0.9)
+    
+    # 3. 添加颜色条
+    plt.colorbar(im, ax=ax, label='Pixel Value')
+    
+    # 4. 计算统计信息
+    _, num_masked_sources = ndi.label(mask)
+    n_masked_pixels = np.sum(mask)
+    pct_masked = 100 * n_masked_pixels / mask.size
+    
+    # 5. 添加信息文本框
+    info_text = (
+        f"Masked sources: {num_masked_sources}\n"
+        f"Masked pixels: {n_masked_pixels} ({pct_masked:.3f}%)\n"
+        f"Algorithm: Smart Combined"
+    )
+    ax.text(
+        0.02, 0.98, info_text, transform=ax.transAxes,
+        fontsize=11, verticalalignment='top',
+        bbox=dict(boxstyle='round', facecolor='white', alpha=0.85)
+    )
+    
     plt.tight_layout()
-    plt.savefig(out_path, dpi=dpi)
+    plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
     plt.close()
-    logging.info("Saved detection mask overlay: %s", out_path)
+    logging.info("Saved diagnostic mask: %s", out_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -249,13 +287,20 @@ def main() -> None:
 
     magzpt = get_header_float(header, "MAGZPT")
     magzrr = get_header_float(header, "MAGZRR")
+    exptime = get_header_float(header, "EXPTIME") or 1.0
+    gain = get_header_float(header, "GAIN")
+    
     logging.info("Header MAGZPT: %s", f"{magzpt:.6g}" if magzpt is not None else "None")
     logging.info("Header MAGZRR: %s", f"{magzrr:.6g}" if magzrr is not None else "None")
+    logging.info("Header EXPTIME: %.6g", exptime)
+    logging.info("Header GAIN: %s", f"{gain:.6g}" if gain is not None else "None")
 
     # Print shape and header as per step 2 requirement
     print(f"Image shape: {image.shape}")
     print(f"MAGZPT: {magzpt}")
     print(f"MAGZRR: {magzrr}")
+    print(f"EXPTIME: {exptime}")
+    print(f"GAIN: {gain}")
 
     # Determine working image (subimage for dev if provided)
     bbox = parse_subimage_arg(args.subimage)
@@ -263,14 +308,23 @@ def main() -> None:
     if bbox is not None:
         logging.info("Using subimage bbox: x0=%d, x1=%d, y0=%d, y1=%d", *bbox)
 
-    # Saturation mask (diagnostic + detection exclusion)
-    saturation_mask = compute_saturation_mask(work_image)
+    # --- 1. 背景与噪声估算 (提前到掩模之前) ---
+    background, sigma = estimate_background_and_noise(work_image)
+    detection_thr = background + args.sigma_thresh * sigma
+    logging.info("Calculated detection threshold for masking: %.3f", detection_thr)
+
+    # --- 2. 智能饱和掩模 (同步探测参数) ---
+    saturation_mask = compute_saturation_mask(
+        work_image, 
+        threshold_low=detection_thr, 
+        pre_smooth_sigma=args.pre_smooth_sigma
+    )
     save_mask(
         work_image,
         saturation_mask,
         diagnostics_dir / "saturation_mask.png",
-        title="Saturation/Bloom mask",
-        figsize=(8, 8),
+        title="Final Mask (Padded / Consistent with Detection)",
+        figsize=(12, 10),
         dpi=220,
     )
 
@@ -281,10 +335,7 @@ def main() -> None:
         title="Pixel Histogram (5-99th pct range)",
     )
 
-    # Robust background + noise estimation (step 3)
-    background, sigma = estimate_background_and_noise(work_image)
-
-    # Threshold-based detection (step 3)
+    # --- 3. 基于阈值的源探测 ---
     mask, labeled, num_labels, thr = detect_threshold(
         work_image,
         background,
@@ -320,9 +371,27 @@ def main() -> None:
         edge_buffer_px=int(args.edge_buffer_px),
         detection_sigma_thresh=float(args.sigma_thresh),
         seeing_fwhm=float(args.seeing_fwhm),
+        exptime=exptime,
+        gain=gain,
     )
     rows = []
-    for label_id in range(1, num_labels + 1):
+    slices = ndi.find_objects(labeled)
+    pad = int(args.annulus_rout_px + 2)
+    h, w = work_image.shape
+
+    for label_id, slc in enumerate(slices, start=1):
+        if slc is None:
+            continue
+        
+        # --- Padded Slice Logic ---
+        y_slc, x_slc = slc
+        y_start = max(0, y_slc.start - pad)
+        y_stop = min(h, y_slc.stop + pad)
+        x_start = max(0, x_slc.start - pad)
+        x_stop = min(w, x_slc.stop + pad)
+        padded_slc = (slice(y_start, y_stop), slice(x_start, x_stop))
+        # -------------------------
+
         props = label_props.get(label_id, {})
         row = measure_source(
             work_image,
@@ -333,6 +402,7 @@ def main() -> None:
             magzrr,
             params,
             source_attrs=props,
+            label_slice=padded_slc,
         )
         if row:
             rows.append(row)
@@ -344,6 +414,8 @@ def main() -> None:
     meta = {
         "MAGZPT": magzpt,
         "MAGZRR": magzrr,
+        "EXPTIME": exptime,
+        "GAIN": gain,
         "params": {
             "sigma_thresh": args.sigma_thresh,
             "pre_smooth_sigma": args.pre_smooth_sigma,
