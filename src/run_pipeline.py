@@ -143,7 +143,7 @@ def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
         plt.errorbar(mags_sorted, log_n, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
         
         # Fit range: from bright end up to where completeness begins to drop (rollover)
-        idx_start = int(0.05 * mags_sorted.size)
+        idx_start = int(0.001 * mags_sorted.size)
         idx_end = int(0.65 * mags_sorted.size)
         
         fit_m = mags_sorted[idx_start:idx_end]
@@ -166,7 +166,7 @@ def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
     
     plt.title(title)
     plt.tight_layout()
-    plt.savefig(out_path, dpi=150)
+    plt.savefig(out_path, dpi=220)
     plt.close()
     logging.info("Saved counts fit plot: %s", out_path)
 
@@ -190,7 +190,7 @@ def save_counts_normalized_fit(mags: np.ndarray, area_deg2: float, out_path: Pat
         plt.errorbar(mags_sorted, log_n_deg2, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
         
         # Fit range
-        idx_start = int(0.05 * mags_sorted.size)
+        idx_start = int(0.001 * mags_sorted.size)
         idx_end = int(0.65 * mags_sorted.size)
         
         fit_m = mags_sorted[idx_start:idx_end]
@@ -219,6 +219,79 @@ def save_counts_normalized_fit(mags: np.ndarray, area_deg2: float, out_path: Pat
     plt.savefig(out_path, dpi=220)
     plt.close()
     logging.info("Saved normalized counts fit plot: %s", out_path)
+
+
+def save_differential_counts_fit(
+    mags: np.ndarray,
+    out_path: Path,
+    title: str,
+    bin_width: float = 0.25,
+    area_deg2: Optional[float] = None,
+) -> None:
+    """Differential counts with Poisson errors and linear fit in log space."""
+    plt.figure(figsize=(6, 4))
+    if mags.size < 5:
+        plt.text(0.5, 0.5, "Insufficient data for differential counts", ha="center", va="center")
+    else:
+        m_min = np.floor(mags.min() / bin_width) * bin_width
+        m_max = np.ceil(mags.max() / bin_width) * bin_width
+        bins = np.arange(m_min, m_max + bin_width, bin_width)
+        counts, edges = np.histogram(mags, bins=bins)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+
+        # Convert to counts per magnitude (and per deg^2 if area provided)
+        rate = counts / bin_width
+        if area_deg2 and area_deg2 > 0:
+            rate = rate / area_deg2
+
+        valid = counts > 0
+        if np.any(valid):
+            log_rate = np.log10(rate[valid])
+            # Poisson errors in log space: sigma_log ≈ 0.434 / sqrt(N)
+            err_log = 0.434 / np.sqrt(counts[valid])
+
+            plt.errorbar(
+                centers[valid],
+                log_rate,
+                yerr=err_log,
+                fmt="k.",
+                markersize=4,
+                alpha=0.7,
+                label="Differential counts",
+            )
+
+            # Fit range: 0.1%-65% of valid bins (or start at 0 for small samples)
+            idx = np.where(valid)[0]
+            start = max(0, int(0.01 * idx.size))
+            end = int(0.65 * idx.size)
+            fit_idx = idx[start:end] if end > start else idx
+            fit_m = centers[fit_idx]
+            fit_y = np.log10(rate[fit_idx])
+            if fit_m.size > 2:
+                coeffs, cov = np.polyfit(fit_m, fit_y, 1, cov=True)
+                slope, intercept = coeffs
+                slope_err = np.sqrt(cov[0, 0])
+                m_range = np.linspace(centers.min(), centers.max(), 100)
+                plt.plot(
+                    m_range,
+                    slope * m_range + intercept,
+                    "r--",
+                    label=f"Linear Fit (slope={slope:.3f}±{slope_err:.3f})",
+                )
+                plt.axvspan(fit_m.min(), fit_m.max(), color="tab:blue", alpha=0.1, label="Fit range")
+
+        ylabel = "log10 dN/dm"
+        if area_deg2 and area_deg2 > 0:
+            ylabel += " [deg⁻² mag⁻¹]"
+        plt.xlabel("Magnitude")
+        plt.ylabel(ylabel)
+        plt.legend(fontsize="small")
+
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+    logging.info("Saved differential counts plot: %s", out_path)
 
 
 
@@ -605,6 +678,20 @@ def main() -> None:
         mags_finite,
         diagnostics_dir / "counts_linear_fit.png",
         title="Cumulative Counts Linear Fit",
+    )
+    save_differential_counts_fit(
+        mags_finite,
+        diagnostics_dir / "counts_differential_fit.png",
+        title="Differential Counts Linear Fit",
+        bin_width=0.25,
+        area_deg2=None,
+    )
+    save_differential_counts_fit(
+        mags_finite,
+        diagnostics_dir / "counts_differential_norm_fit.png",
+        title="Differential Counts per deg² Linear Fit",
+        bin_width=0.25,
+        area_deg2=area_deg2,
     )
     mask_sig = np.isfinite(mag_arr) & np.isfinite(mag_err_arr)
     save_scatter(

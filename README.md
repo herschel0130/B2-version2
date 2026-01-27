@@ -75,6 +75,8 @@ Notes:
   - `counts_normalized.png`: Cumulative counts per square degree (deg⁻²) with Euclidean slope reference
   - `counts_normalized_fit.png`: Linear fit to the normalized cumulative counts with Poisson error bars and slope uncertainty.
   - `counts_linear_fit.png`: Linear fit to the cumulative counts with Poisson error bars and slope uncertainty.
+  - `counts_differential_fit.png`: Differential counts (dN/dm) fit with Poisson errors.
+  - `counts_differential_norm_fit.png`: Differential counts per deg² fit with Poisson errors.
   - `sigma_m_vs_m.png`: Magnitude errors vs magnitude
   - `concentration_vs_m.png`: Concentration vs magnitude (star cut overlay)
 
