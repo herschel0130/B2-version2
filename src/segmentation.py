@@ -1,6 +1,6 @@
 import logging
 import warnings
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 from astropy.modeling import fitting, models
@@ -13,7 +13,7 @@ from scipy import ndimage as ndi
 
 def _calculate_region_moments(xs, ys, weights=None, eps=1e-12):
     """
-    计算区域的矩和形状参数。完全同步 mask-2.py 的 region_moments 实现。
+    计算区域的矩 and 形状参数。完全同步 mask-2.py 的 region_moments 实现。
     """
     xs = np.asarray(xs, dtype=float)
     ys = np.asarray(ys, dtype=float)
@@ -55,7 +55,7 @@ def _calculate_region_moments(xs, ys, weights=None, eps=1e-12):
 
 def compute_saturation_mask(
     image: np.ndarray, 
-    threshold_low: float = 3500.0,    # 同步 smart_mask_combiner.py 的检测阈值
+    threshold_low: Union[float, np.ndarray] = 3500.0,    # 同步 smart_mask_combiner.py 的检测阈值
     threshold_high: float = 10000.0,  # 同步 mask-2.py 的候选阈值
     elongation_threshold: float = 3.0,# 同步 mask-2.py 的离心率阈值
     peak_threshold: float = 40000.0,  # 同步 mask-2.py 的峰值阈值
@@ -122,14 +122,14 @@ def compute_saturation_mask(
 
 def detect_threshold(
     image: np.ndarray,
-    background: float,
-    sigma_noise: float,
+    background: Union[float, np.ndarray],
+    sigma_noise: Union[float, np.ndarray],
     sigma_thresh: float,
     pre_smooth_sigma: float = 0.0,
     min_area: int = 0,
     exclude_mask: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, int, float]:
-    """探测源并排除智能掩模区域。"""
+) -> Tuple[np.ndarray, np.ndarray, int, Union[float, np.ndarray]]:
+    """探测源并排除智能掩模区域。支持局部背景/噪声图。"""
     threshold_value = background + sigma_thresh * sigma_noise
     work = image
     if pre_smooth_sigma and pre_smooth_sigma > 0:
@@ -151,7 +151,7 @@ def detect_threshold(
         mask = np.isin(labeled, keep)
         labeled, num_labels = ndi.label(mask, structure=np.ones((3, 3), bool))
         
-    return mask, labeled, num_labels, float(threshold_value)
+    return mask, labeled, num_labels, threshold_value
 
 # =============================================================================
 # 4. 高斯去重叠逻辑 (deblend_sources)
@@ -167,22 +167,46 @@ def _find_local_peaks(patch, mask):
     order = np.argsort(brightness)[::-1]
     return coords[order][:5]
 
-def _fit_gaussians(patch, mask, centers):
+def _fit_gaussians(patch, mask, centers, bg_val=0.0):
+    """Fit single or multiple Gaussians to a patch, using a fixed background value.
+    
+    Args:
+        patch: 2D array of pixel values.
+        mask: Boolean mask of the source.
+        centers: List of [y, x] peak coordinates.
+        bg_val: Fixed background level to use in the model.
+    """
     if mask.sum() == 0: return float("inf"), None
     ny, nx = patch.shape
     y_grid, x_grid = np.mgrid[:ny, :nx]
-    background = float(np.median(patch[mask]))
-    model = models.Const2D(amplitude=background)
+    
+    # Use the externally provided background value (prevents bias from source pixels - Issue 1)
+    model = models.Const2D(amplitude=bg_val)
+    model.amplitude.fixed = True # Fix background during fit
+    
     for center in centers:
         y0, x0 = center
-        amp = float(max(patch[int(round(y0)), int(round(x0))] - background, 1e-3))
-        model += models.Gaussian2D(amplitude=amp, x_mean=x0, y_mean=y0, x_stddev=1.5, y_stddev=1.5)
+        # Initial amplitude: peak value minus background
+        amp_init = float(max(patch[int(round(y0)), int(round(x0))] - bg_val, 1e-3))
+        
+        # Add Gaussian with physical bounds to prevent runaway sigma (Issue 4)
+        g = models.Gaussian2D(amplitude=amp_init, x_mean=x0, y_mean=y0, x_stddev=2.0, y_stddev=2.0)
+        g.x_stddev.bounds = (0.5, 50.0)
+        g.y_stddev.bounds = (0.5, 50.0)
+        g.amplitude.min = 0.0
+        model += g
+        
     fitter = fitting.LevMarLSQFitter()
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             fitted = fitter(model, x_grid, y_grid, patch, weights=mask.astype(float))
     except: return float("inf"), None
+    
+    # Check if fit succeeded
+    if fitter.fit_info['ierr'] not in [1, 2, 3, 4]:
+        return float("inf"), None
+
     residual = np.sum(((patch - fitted(x_grid, y_grid)) * mask) ** 2)
     return float(residual), fitted
 
@@ -208,33 +232,87 @@ def _compute_fwhm(image, mask):
     var_y = np.sum(vals * (yy - y_mean)**2) / total
     return 2.355 * (np.sqrt(max(var_x, 0) + max(var_y, 0)) / np.sqrt(2))
 
-def deblend_sources(image, labeled, detection_mask, saturation_mask, seeing_fwhm=4.0):
-    """优化版去重叠：利用切片显著提高运行速度。"""
+def deblend_sources(image, labeled, detection_mask, saturation_mask, background, seeing_fwhm=4.0, min_area=10):
+    """优化版去重叠：利用填充切片减少剪裁效应，并记录高斯拟合流量。
+    
+    Args:
+        image: 原始图像
+        labeled: 初始标记图
+        detection_mask: 探测掩模
+        saturation_mask: 饱和掩模
+        background: 全局背景标量或局部背景图
+        seeing_fwhm: 典型视宁度
+        min_area: 拆分后的子组件必须满足的最小面积 (Issue: 防止产生碎片)
+    """
     new_labeled = labeled.copy()
     next_label = int(labeled.max()) + 1
     slices = ndi.find_objects(labeled)
     component_map = {}
+    model_flux_map = {} # label_id -> flux
+    
+    h, w = image.shape
+    fit_pad = 15
 
     for label_id, slc in enumerate(slices, 1):
         if slc is None: continue
-        obj_mask = (labeled[slc] == label_id)
-        if not obj_mask.any(): continue
-        patch = image[slc]
+        
+        obj_mask_orig = (labeled[slc] == label_id)
+        if not obj_mask_orig.any(): continue
+        
+        y_start = max(0, slc[0].start - fit_pad)
+        y_stop = min(h, slc[0].stop + fit_pad)
+        x_start = max(0, slc[1].start - fit_pad)
+        x_stop = min(w, slc[1].stop + fit_pad)
+        padded_slc = (slice(y_start, y_stop), slice(x_start, x_stop))
+        
+        patch = image[padded_slc]
+        obj_mask = (labeled[padded_slc] == label_id)
+        
+        if isinstance(background, np.ndarray):
+            cy_p, cx_p = ndi.center_of_mass(obj_mask)
+            iy, ix = int(round(cy_p + y_start)), int(round(cx_p + x_start))
+            iy, ix = max(0, min(h-1, iy)), max(0, min(w-1, ix))
+            bg_val = float(background[iy, ix])
+        else:
+            bg_val = float(background)
+
         peaks = _find_local_peaks(patch, obj_mask)
         
+        # Deblending threshold: reduced to 0.5 to be more conservative (Issue: avoid over-splitting)
         if len(peaks) > 1:
-            res_single, _ = _fit_gaussians(patch, obj_mask, peaks[[0]])
-            res_multi, _ = _fit_gaussians(patch, obj_mask, peaks)
-            if res_multi < res_single * 0.7:
-                new_labeled[slc][obj_mask] = 0
-                split = _split_mask_by_peaks(obj_mask, peaks, slc[0].start, slc[1].start)
+            res_single, fit_single = _fit_gaussians(patch, obj_mask, peaks[[0]], bg_val=bg_val)
+            res_multi, fit_multi = _fit_gaussians(patch, obj_mask, peaks, bg_val=bg_val)
+            if res_multi < res_single * 0.5 and fit_multi is not None:
+                new_labeled[padded_slc][obj_mask] = 0
+                split = _split_mask_by_peaks(obj_mask, peaks, y_start, x_start)
                 for comp_idx in range(1, len(peaks) + 1):
                     comp_m = split == comp_idx
-                    if comp_m.any():
-                        new_labeled[slc][comp_m] = next_label
+                    if comp_m.any() and np.sum(comp_m) >= min_area:
+                        new_labeled[padded_slc][comp_m] = next_label
                         component_map[next_label] = len(peaks)
+                        # Extract component flux (Gaussian flux = 2*pi*A*sx*sy)
+                        sub_model = fit_multi[comp_idx]
+                        f_model = 2 * np.pi * sub_model.amplitude.value * sub_model.x_stddev.value * sub_model.y_stddev.value
+                        model_flux_map[next_label] = float(f_model)
                         next_label += 1
                 continue
+            elif fit_single is not None:
+                sub_model = fit_single[1]
+                f_model = 2 * np.pi * sub_model.amplitude.value * sub_model.x_stddev.value * sub_model.y_stddev.value
+                model_flux_map[label_id] = float(f_model)
+        else:
+            if len(peaks) == 0:
+                cy_p, cx_p = ndi.center_of_mass(obj_mask)
+                fit_centers = [[cy_p, cx_p]]
+            else:
+                fit_centers = peaks
+                
+            res, fit = _fit_gaussians(patch, obj_mask, fit_centers, bg_val=bg_val)
+            if fit is not None:
+                sub_model = fit[1]
+                f_model = 2 * np.pi * sub_model.amplitude.value * sub_model.x_stddev.value * sub_model.y_stddev.value
+                model_flux_map[label_id] = float(f_model)
+
         component_map[label_id] = 1
 
     # === 关键优化点：使用 find_objects 避免全图循环 ===
@@ -242,13 +320,13 @@ def deblend_sources(image, labeled, detection_mask, saturation_mask, seeing_fwhm
     new_slices = ndi.find_objects(new_labeled)
     for lid, slc in enumerate(new_slices, 1):
         if slc is None: continue
-        # 在局部切片中计算，速度极快
         m = (new_labeled[slc] == lid)
         if not m.any(): continue
         
         final_props[lid] = {
             "fwhm_px": _compute_fwhm(image[slc], m),
             "parent_components": component_map.get(lid, 1),
-            "touches_saturation": np.any(m & saturation_mask[slc])
+            "touches_saturation": np.any(m & saturation_mask[slc]),
+            "flux_model": model_flux_map.get(lid, np.nan)
         }
     return new_labeled, final_props

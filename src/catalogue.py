@@ -30,6 +30,15 @@ CATALOG_COLUMNS_RECOMMENDED: List[str] = [
     "fwhm_pix",
     "deblend_components",
     "touches_saturation",
+    "flux_iso",
+    "flux_iso_err",
+    "mag_iso",
+    "mag_iso_err",
+    "area_iso",
+    "flux_model",
+    "flux_model_err",
+    "mag_model",
+    "mag_model_err",
 ]
 
 

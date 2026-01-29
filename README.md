@@ -77,6 +77,16 @@ Notes:
   - `counts_linear_fit.png`: Linear fit to the cumulative counts with Poisson error bars and slope uncertainty.
   - `counts_differential_fit.png`: Differential counts (dN/dm) fit with Poisson errors.
   - `counts_differential_norm_fit.png`: Differential counts per deg² fit with Poisson errors.
+  - `counts_isophotal_linear_fit.png`: Isophotal cumulative counts fit.
+  - `counts_isophotal_normalized_fit.png`: Isophotal normalized cumulative counts fit.
+  - `counts_isophotal_differential_fit.png`: Isophotal differential counts fit.
+  - `counts_isophotal_differential_norm_fit.png`: Isophotal differential counts per deg² fit.
+  - `counts_model_linear_fit.png`: Model cumulative counts fit (Gaussian fit).
+  - `counts_model_normalized_fit.png`: Model normalized cumulative counts fit.
+  - `counts_model_differential_fit.png`: Model differential counts fit.
+  - `counts_model_differential_norm_fit.png`: Model differential counts per deg² fit.
+  - `mag_comparison_model_ap.png`: Magnitude difference ($Mag_{model} - Mag_{ap}$) vs Magnitude.
+  - `counts_combined_differential.png`: Combined differential counts for Aperture, Isophotal, and Model methods.
   - `sigma_m_vs_m.png`: Magnitude errors vs magnitude
   - `concentration_vs_m.png`: Concentration vs magnitude (star cut overlay)
 
@@ -96,6 +106,7 @@ Notes:
 
 - **Saturation & artifact masking:** Pixels above ~50k counts are masked (plus a generous dilation) and excluded from detection/photometry. The mask is saved to `outputs/diagnostics/saturation_mask.png` and sources touching this area set bit 4 in their flags.
 - **De-blending via Gaussian fitting:** Each connected component is inspected for multiple peaks. When a multi-component Gaussian fit reduces the residual significantly, the mask is split, and the new components appear as separate rows with the parent component count recorded in `deblend_components`.
+- **Model Photometry (Extension):** In addition to fixed-aperture and isophotal measurements, the pipeline now provides **Model Flux** by integrating the 2D Gaussian profiles used during deblending. This method extrapolates flux beyond the detection boundary, potentially recovering missing light for extended sources.
 - **FWHM-driven star/galaxy separation:** Each source stores `fwhm_pix`. Objects consistent with the `--seeing_fwhm` value and compact concentration are flagged as probable stars (bit 64), while extended/multi-component sources set the bright-extended flag (bit 32).
 
 ### Parameters (key)
@@ -126,6 +137,8 @@ Recommended:
 - `flux_ap3`, `flux_ap6`, `mag_ap3`, `mag_ap6` (float)
 - `concentration` (float), `is_prob_star` (bool)
 - `fwhm_pix`, `deblend_components`, `touches_saturation`
+- `flux_iso`, `flux_iso_err`, `mag_iso`, `mag_iso_err`, `area_iso`
+- `flux_model`, `flux_model_err`, `mag_model`, `mag_model_err`
 
 ### Calibration details
 - **Exposure Time**: If `EXPTIME` is found in the FITS header, the pipeline uses: `m = ZP - 2.5 * log10(flux / EXPTIME)`.

@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 
-from .background import estimate_background_and_noise
+from .background import estimate_background_and_noise, estimate_background_maps
 from .io_utils import extract_subimage, get_header_float, parse_subimage_arg, read_fits
 from .segmentation import (
     compute_saturation_mask,
@@ -127,7 +127,13 @@ def save_cumulative_counts(
     logging.info("Saved counts plot: %s", out_path)
 
 
-def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
+def save_counts_fit(
+    mags: np.ndarray,
+    out_path: Path,
+    title: str,
+    fit_start_pct: float = 0.05,
+    fit_end_pct: float = 0.65,
+) -> None:
     """Cumulative counts with Poisson error bars and a linear fit to the Euclidean range."""
     plt.figure(figsize=(6, 4))
     if mags.size < 5:
@@ -137,14 +143,14 @@ def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
         n_cum = np.arange(1, mags_sorted.size + 1)
         log_n = np.log10(n_cum)
         
-        # Poisson error: sigma(N) = sqrt(N). Error in log10(N) is approx 0.434 * sigma(N) / N
+        # Poisson error
         err_log_n = 0.434 * np.sqrt(n_cum) / n_cum
         
         plt.errorbar(mags_sorted, log_n, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
         
-        # Fit range: from bright end up to where completeness begins to drop (rollover)
-        idx_start = int(0.001 * mags_sorted.size)
-        idx_end = int(0.65 * mags_sorted.size)
+        # Custom fit range (Issue: Avoid Rollover/Bias)
+        idx_start = max(0, int(fit_start_pct * mags_sorted.size))
+        idx_end = min(mags_sorted.size, int(fit_end_pct * mags_sorted.size))
         
         fit_m = mags_sorted[idx_start:idx_end]
         fit_log_n = log_n[idx_start:idx_end]
@@ -171,7 +177,14 @@ def save_counts_fit(mags: np.ndarray, out_path: Path, title: str) -> None:
     logging.info("Saved counts fit plot: %s", out_path)
 
 
-def save_counts_normalized_fit(mags: np.ndarray, area_deg2: float, out_path: Path, title: str) -> None:
+def save_counts_normalized_fit(
+    mags: np.ndarray,
+    area_deg2: float,
+    out_path: Path,
+    title: str,
+    fit_start_pct: float = 0.05,
+    fit_end_pct: float = 0.65,
+) -> None:
     """Cumulative counts per deg2 with Poisson error bars and a linear fit."""
     plt.figure(figsize=(6, 4))
     if mags.size < 5 or area_deg2 <= 0:
@@ -183,15 +196,14 @@ def save_counts_normalized_fit(mags: np.ndarray, area_deg2: float, out_path: Pat
         n_deg2 = n_cum / area_deg2
         log_n_deg2 = np.log10(n_deg2)
         
-        # Poisson error propagation to log10(N/Area)
-        # sigma(log10(N/A)) = 0.434 * sigma(N/A) / (N/A) = 0.434 * (sqrt(N)/A) / (N/A) = 0.434 / sqrt(N)
+        # Poisson error
         err_log_n = 0.434 / np.sqrt(n_cum)
         
         plt.errorbar(mags_sorted, log_n_deg2, yerr=err_log_n, fmt='k.', markersize=1, alpha=0.2, label='Data (Poisson err)')
         
-        # Fit range
-        idx_start = int(0.001 * mags_sorted.size)
-        idx_end = int(0.65 * mags_sorted.size)
+        # Custom fit range
+        idx_start = max(0, int(fit_start_pct * mags_sorted.size))
+        idx_end = min(mags_sorted.size, int(fit_end_pct * mags_sorted.size))
         
         fit_m = mags_sorted[idx_start:idx_end]
         fit_log_n = log_n_deg2[idx_start:idx_end]
@@ -227,6 +239,8 @@ def save_differential_counts_fit(
     title: str,
     bin_width: float = 0.25,
     area_deg2: Optional[float] = None,
+    fit_start_pct: float = 0.05,
+    fit_end_pct: float = 0.65,
 ) -> None:
     """Differential counts with Poisson errors and linear fit in log space."""
     plt.figure(figsize=(6, 4))
@@ -260,10 +274,10 @@ def save_differential_counts_fit(
                 label="Differential counts",
             )
 
-            # Fit range: 0.1%-65% of valid bins (or start at 0 for small samples)
+            # Custom fit range
             idx = np.where(valid)[0]
-            start = max(0, int(0.01 * idx.size))
-            end = int(0.65 * idx.size)
+            start = max(0, int(fit_start_pct * idx.size))
+            end = min(idx.size, int(fit_end_pct * idx.size))
             fit_idx = idx[start:end] if end > start else idx
             fit_m = centers[fit_idx]
             fit_y = np.log10(rate[fit_idx])
@@ -338,6 +352,18 @@ def save_counts_normalized(mags: np.ndarray, area_deg2: float, out_path: Path, t
     logging.info("Saved normalized counts plot: %s", out_path)
 
 
+def save_map(image: np.ndarray, out_path: Path, title: str) -> None:
+    """Save a 2D map (e.g., background or sigma) as an image."""
+    plt.figure(figsize=(8, 6))
+    im = plt.imshow(image, origin="lower", cmap="viridis")
+    plt.colorbar(im, label="Value")
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    logging.info("Saved map: %s", out_path)
+
+
 def save_mask(
     image: np.ndarray,
     mask: np.ndarray,
@@ -399,6 +425,179 @@ def save_mask(
     plt.savefig(out_path, dpi=dpi, bbox_inches='tight')
     plt.close()
     logging.info("Saved diagnostic mask: %s", out_path)
+
+
+def save_mag_comparison(mag_ap: np.ndarray, mag_model: np.ndarray, out_path: Path) -> None:
+    """Plot Mag_model - Mag_ap vs Mag_ap to show flux recovery."""
+    plt.figure(figsize=(8, 6))
+    valid = np.isfinite(mag_ap) & np.isfinite(mag_model)
+    if not np.any(valid):
+        plt.text(0.5, 0.5, "No valid data for comparison", ha="center", va="center")
+    else:
+        diff = mag_model[valid] - mag_ap[valid]
+        plt.scatter(mag_ap[valid], diff, s=10, alpha=0.4, color='tab:purple')
+        plt.axhline(0, color='red', linestyle='--', linewidth=1)
+        plt.xlabel("Aperture Magnitude (mag_ap)")
+        plt.ylabel("$\Delta$Mag (mag_model - mag_ap)")
+        plt.title("Magnitude Comparison: Model vs Aperture")
+        plt.grid(True, alpha=0.3)
+        
+        # Add stats for bright sources (e.g. mag < 20)
+        bright = (mag_ap[valid] < 20)
+        if np.any(bright):
+            mean_diff = np.mean(diff[bright])
+            plt.text(0.05, 0.05, f"Mean $\Delta$Mag (bright < 20): {mean_diff:.3f}", 
+                     transform=plt.gca().transAxes, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=200)
+    plt.close()
+    logging.info("Saved magnitude comparison plot: %s", out_path)
+
+
+def save_combined_differential_counts(
+    mags_list: list,
+    labels: list,
+    out_path: Path,
+    title: str,
+    bin_width: float = 0.25,
+    area_deg2: Optional[float] = None,
+    fit_ranges: Optional[list] = None,
+) -> None:
+    """Combined dN/dm plot for multiple sequences with fits and uncertainties.
+    
+    Args:
+        mags_list: List of magnitude arrays.
+        labels: List of labels for each array.
+        out_path: Path to save plot.
+        title: Plot title.
+        bin_width: Bin width for histogram.
+        area_deg2: Normalization area.
+        fit_ranges: List of (start_pct, end_pct) tuples for each sequence.
+    """
+    plt.figure(figsize=(10, 7))
+    colors = ['tab:blue', 'tab:green', 'tab:red']
+    
+    if fit_ranges is None:
+        fit_ranges = [(0.05, 0.65)] * len(mags_list)
+    
+    for i, (mags, label) in enumerate(zip(mags_list, labels)):
+        mags_f = mags[np.isfinite(mags)]
+        if mags_f.size < 5:
+            continue
+            
+        m_min = np.floor(mags_f.min() / bin_width) * bin_width
+        m_max = np.ceil(mags_f.max() / bin_width) * bin_width
+        bins = np.arange(m_min, m_max + bin_width, bin_width)
+        counts, edges = np.histogram(mags_f, bins=bins)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        
+        rate = counts / bin_width
+        if area_deg2 and area_deg2 > 0:
+            rate = rate / area_deg2
+            
+        valid = counts > 0
+        if not np.any(valid):
+            continue
+            
+        log_rate = np.log10(rate[valid])
+        err_log = 0.434 / np.sqrt(counts[valid])
+        
+        color = colors[i % len(colors)]
+        plt.errorbar(centers[valid], log_rate, yerr=err_log, fmt='.', color=color, markersize=6, alpha=0.6, label=f'{label} data')
+        
+        # Use specific fit range for this method
+        f_start, f_end = fit_ranges[i]
+        idx = np.where(valid)[0]
+        start = max(0, int(f_start * idx.size))
+        end = min(idx.size, int(f_end * idx.size))
+        fit_idx = idx[start:end] if end > start else idx
+        fit_m = centers[fit_idx]
+        fit_y = np.log10(rate[fit_idx])
+        
+        if fit_m.size > 2:
+            coeffs, cov = np.polyfit(fit_m, fit_y, 1, cov=True)
+            slope, intercept = coeffs
+            slope_err = np.sqrt(cov[0, 0])
+            m_range = np.linspace(fit_m.min(), fit_m.max(), 100)
+            plt.plot(m_range, slope * m_range + intercept, color=color, linestyle='--', linewidth=2,
+                     label=f'{label} Fit (slope={slope:.3f}$\pm${slope_err:.3f}, range=[{fit_m.min():.1f},{fit_m.max():.1f}])')
+
+    plt.xlabel("Magnitude")
+    ylabel = "log10 dN/dm"
+    if area_deg2 and area_deg2 > 0:
+        ylabel += " [deg⁻² mag⁻¹]"
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.legend(fontsize="small", loc='lower right')
+    plt.grid(True, alpha=0.2)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+    logging.info("Saved combined differential counts plot: %s", out_path)
+
+
+def save_overlay_wechat(
+    mags_list: list,
+    labels: list,
+    area_deg2: float,
+    bg_path: Path,
+    out_path: Path,
+    fit_ranges: list = None
+) -> None:
+    """Overlay normalized cumulative counts curves on a background JPG image.
+    
+    Coordinate mapping: (R=14, log10(N)=0) -> (120, 700) in 909x832 image.
+    """
+    if not bg_path.exists():
+        logging.warning("Background image %s not found. Skipping overlay.", bg_path)
+        return
+
+    try:
+        img = plt.imread(str(bg_path))
+    except Exception as e:
+        logging.warning("Could not read background image %s: %s", bg_path, e)
+        return
+
+    h, w = img.shape[:2]
+    # Match the image dimensions exactly
+    plt.figure(figsize=(w/100, h/100), dpi=100)
+    plt.imshow(img)
+    
+    # User specified mapping: (R=14, N=1) -> (120, 700)
+    # N=1 means log10(N)=0
+    x0, y0 = 120, 700
+    
+    # Guessed scales based on image dimensions and standard plot ranges (R: 14-26, logN: 0-6)
+    scale_x = 60.0  # pixels per magnitude
+    scale_y = 100.0 # pixels per dex (log10 unit)
+    
+    colors = ['tab:blue', 'tab:green', 'tab:red']
+    
+    for i, (mags, label) in enumerate(zip(mags_list, labels)):
+        mags_f = mags[np.isfinite(mags)]
+        if mags_f.size < 5:
+            continue
+            
+        mags_sorted = np.sort(mags_f)
+        n_cum = np.arange(1, mags_sorted.size + 1)
+        log_n_deg2 = np.log10(n_cum / area_deg2)
+        
+        # Convert to pixel coordinates
+        x_pix = x0 + (mags_sorted - 14) * scale_x
+        y_pix = y0 - (log_n_deg2 - 0) * scale_y
+        
+        # Plot the actual data curve instead of the fit
+        plt.plot(x_pix, y_pix, color=colors[i % len(colors)], linewidth=2, 
+                 label=f"{label} counts")
+
+    plt.xlim(0, w)
+    plt.ylim(h, 0) # Image coordinates: 0 at top
+    plt.axis('off')
+    plt.tight_layout(pad=0)
+    plt.savefig(out_path, dpi=100, bbox_inches='tight', pad_inches=0)
+    plt.close()
+    logging.info("Saved overlay plot on JPG: %s", out_path)
 
 
 def parse_args() -> argparse.Namespace:
@@ -477,6 +676,17 @@ def parse_args() -> argparse.Namespace:
         default=4.0,
         help="Expected seeing FWHM in pixels for star/galaxy classification.",
     )
+    parser.add_argument(
+        "--use_local_bkg",
+        action="store_true",
+        help="Use spatially varying background and noise maps.",
+    )
+    parser.add_argument(
+        "--mesh_size",
+        type=int,
+        default=128,
+        help="Mesh size in pixels for local background maps.",
+    )
     return parser.parse_args()
 
 
@@ -518,14 +728,28 @@ def main() -> None:
         logging.info("Using subimage bbox: x0=%d, x1=%d, y0=%d, y1=%d", *bbox)
 
     # --- 1. 背景与噪声估算 (提前到掩模之前) ---
-    background, sigma = estimate_background_and_noise(work_image)
-    detection_thr = background + args.sigma_thresh * sigma
-    logging.info("Calculated detection threshold for masking: %.3f", detection_thr)
+    # 始终计算全局背景和噪声，用于统一的 Mask 探测阈值
+    global_bkg, global_sigma = estimate_background_and_noise(work_image)
+    global_thr = global_bkg + args.sigma_thresh * global_sigma
+    
+    if args.use_local_bkg:
+        # 使用简单的全局阈值先排除亮源，防止背景图被污染 (Issue 2)
+        seed_mask_for_bkg = work_image > (global_bkg + 5.0 * global_sigma)
+        background, sigma = estimate_background_maps(
+            work_image, mesh_size=args.mesh_size, exclude_mask=seed_mask_for_bkg
+        )
+        save_map(background, diagnostics_dir / "background_map.png", "Local Background Level")
+        save_map(sigma, diagnostics_dir / "sigma_map.png", "Local Noise (Sigma) Level")
+        logging.info("Using Local Background Maps (cleaned of bright sources) for photometry fallback.")
+    else:
+        background, sigma = global_bkg, global_sigma
 
-    # --- 2. 智能饱和掩模 (同步探测参数) ---
+    logging.info("Global detection threshold for masking: %.3f", global_thr)
+
+    # --- 2. 智能饱和掩模 (使用全局固定阈值) ---
     saturation_mask = compute_saturation_mask(
         work_image, 
-        threshold_low=detection_thr, 
+        threshold_low=global_thr, 
         pre_smooth_sigma=args.pre_smooth_sigma
     )
     
@@ -540,7 +764,7 @@ def main() -> None:
         work_image,
         saturation_mask,
         diagnostics_dir / "saturation_mask.png",
-        title="Final Mask (Padded / Consistent with Detection)",
+        title=f"Saturation Mask (thr={global_thr:.2f})",
         figsize=(12, 10),
         dpi=220,
     )
@@ -552,7 +776,7 @@ def main() -> None:
         title="Pixel Histogram (5-99th pct range)",
     )
 
-    # --- 3. 基于阈值的源探测 ---
+    # --- 3. 基于阈值的源探测 (使用局部图 if enabled) ---
     mask, labeled, num_labels, thr = detect_threshold(
         work_image,
         background,
@@ -562,19 +786,25 @@ def main() -> None:
         min_area=args.min_area,
         exclude_mask=saturation_mask,
     )
-    logging.info("Threshold used: %.6g ; detections: %d", thr, num_labels)
+    
+    if isinstance(thr, np.ndarray):
+        thr_str = f"map(mean={np.nanmean(thr):.2f})"
+    else:
+        thr_str = f"{thr:.3f}"
+
+    logging.info("Threshold used: %s ; detections: %d", thr_str, num_labels)
     save_mask(
         work_image,
         mask,
         diagnostics_dir / "detection_mask.png",
-        title=f"Detections (thr={thr:.3f})",
+        title=f"Detections (thr={thr_str})",
         figsize=(8, 8),
         dpi=220,
     )
 
     # Deblend and record FWHM, saturation overlaps
     labeled, label_props = deblend_sources(
-        work_image, labeled, mask, saturation_mask, seeing_fwhm=args.seeing_fwhm
+        work_image, labeled, mask, saturation_mask, background, seeing_fwhm=args.seeing_fwhm
     )
     num_labels = int(np.max(labeled))
     logging.info("After deblending, %d labels remain.", num_labels)
@@ -620,6 +850,7 @@ def main() -> None:
             params,
             source_attrs=props,
             label_slice=padded_slc,
+            global_background=background,
         )
         if row:
             rows.append(row)
@@ -673,11 +904,13 @@ def main() -> None:
         area_deg2,
         diagnostics_dir / "counts_normalized_fit.png",
         title="Normalized Cumulative Counts Linear Fit",
+        fit_start_pct=0.001, fit_end_pct=0.65,
     )
     save_counts_fit(
         mags_finite,
         diagnostics_dir / "counts_linear_fit.png",
         title="Cumulative Counts Linear Fit",
+        fit_start_pct=0.001, fit_end_pct=0.65,
     )
     save_differential_counts_fit(
         mags_finite,
@@ -685,6 +918,7 @@ def main() -> None:
         title="Differential Counts Linear Fit",
         bin_width=0.25,
         area_deg2=None,
+        fit_start_pct=0.05, fit_end_pct=0.65,
     )
     save_differential_counts_fit(
         mags_finite,
@@ -692,7 +926,90 @@ def main() -> None:
         title="Differential Counts per deg² Linear Fit",
         bin_width=0.25,
         area_deg2=area_deg2,
+        fit_start_pct=0.05, fit_end_pct=0.65,
     )
+
+    # --- Diagnostics for Isophotal Photometry ---
+    mag_iso_arr = np.array([r.get("mag_iso", np.nan) for r in rows], dtype=float)
+    mags_iso_finite = mag_iso_arr[np.isfinite(mag_iso_arr)]
+    if mags_iso_finite.size > 0:
+        save_counts_normalized_fit(
+            mags_iso_finite,
+            area_deg2,
+            diagnostics_dir / "counts_isophotal_normalized_fit.png",
+            title="Isophotal Normalized Cumulative Counts Linear Fit",
+            fit_start_pct=0.001, fit_end_pct=0.65,
+        )
+        save_counts_fit(
+            mags_iso_finite,
+            diagnostics_dir / "counts_isophotal_linear_fit.png",
+            title="Isophotal Cumulative Counts Linear Fit",
+            fit_start_pct=0.001, fit_end_pct=0.65,
+        )
+        save_differential_counts_fit(
+            mags_iso_finite,
+            diagnostics_dir / "counts_isophotal_differential_fit.png",
+            title="Isophotal Differential Counts Linear Fit",
+            bin_width=0.25,
+            area_deg2=None,
+            fit_start_pct=0.05, fit_end_pct=0.65,
+        )
+        save_differential_counts_fit(
+            mags_iso_finite,
+            diagnostics_dir / "counts_isophotal_differential_norm_fit.png",
+            title="Isophotal Differential Counts per deg² Linear Fit",
+            bin_width=0.25,
+            area_deg2=area_deg2,
+            fit_start_pct=0.05, fit_end_pct=0.65,
+        )
+
+    # --- Diagnostics for Model Photometry (Gaussian Fit) ---
+    mag_model_arr = np.array([r.get("mag_model", np.nan) for r in rows], dtype=float)
+    mags_model_finite = mag_model_arr[np.isfinite(mag_model_arr)]
+    if mags_model_finite.size > 0:
+        save_counts_normalized_fit(
+            mags_model_finite,
+            area_deg2,
+            diagnostics_dir / "counts_model_normalized_fit.png",
+            title="Model Normalized Cumulative Counts Linear Fit",
+            fit_start_pct=0.20, fit_end_pct=0.80,
+        )
+        save_counts_fit(
+            mags_model_finite,
+            diagnostics_dir / "counts_model_linear_fit.png",
+            title="Model Cumulative Counts Linear Fit",
+            fit_start_pct=0.20, fit_end_pct=0.80,
+        )
+        save_differential_counts_fit(
+            mags_model_finite,
+            diagnostics_dir / "counts_model_differential_fit.png",
+            title="Model Differential Counts Linear Fit",
+            bin_width=0.25,
+            area_deg2=None,
+            fit_start_pct=0.20, fit_end_pct=0.80,
+        )
+        save_differential_counts_fit(
+            mags_model_finite,
+            diagnostics_dir / "counts_model_differential_norm_fit.png",
+            title="Model Differential Counts per deg² Linear Fit",
+            bin_width=0.25,
+            area_deg2=area_deg2,
+            fit_start_pct=0.20, fit_end_pct=0.80,
+        )
+
+    # --- New Combined Diagnostics (Aperture, Isophotal, Model) ---
+    save_mag_comparison(mag_arr, mag_model_arr, diagnostics_dir / "mag_comparison_model_ap.png")
+    
+    save_combined_differential_counts(
+        [mag_arr, mag_iso_arr, mag_model_arr],
+        ["Aperture", "Isophotal", "Model"],
+        diagnostics_dir / "counts_combined_differential.png",
+        title="Combined Differential Number Counts (Normalized)",
+        bin_width=0.25,
+        area_deg2=area_deg2,
+        fit_ranges=[(0.05, 0.65), (0.05, 0.65), (0.20, 0.80)]
+    )
+
     mask_sig = np.isfinite(mag_arr) & np.isfinite(mag_err_arr)
     save_scatter(
         mag_arr[mask_sig],
@@ -713,6 +1030,15 @@ def main() -> None:
         title="Concentration vs magnitude",
         y_line=float(args.star_concentration_cut),
         empty_message="No concentration data to plot",
+    )
+
+    # --- JPG Overlay (Extension) ---
+    save_overlay_wechat(
+        [mag_arr, mag_iso_arr, mag_model_arr],
+        ["Aperture", "Isophotal", "Model"],
+        area_deg2,
+        Path("src/WechatIMG8380.jpg"),
+        diagnostics_dir / "counts_overlay_wechat.png"
     )
 
     logging.info("Photometry and diagnostics completed.")

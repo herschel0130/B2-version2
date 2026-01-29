@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 from scipy import ndimage as ndi
@@ -170,12 +170,13 @@ def measure_source(
     image: np.ndarray,
     label_id: int,
     labeled: np.ndarray,
-    global_sigma: float,
+    global_sigma: Union[float, np.ndarray],
     magzpt: Optional[float],
     magzrr: Optional[float],
     params: PhotometryParams,
     source_attrs: Optional[Dict[str, float]] = None,
     label_slice: Optional[Tuple[slice, slice]] = None,
+    global_background: Optional[Union[float, np.ndarray]] = None,
 ) -> Dict:
     """Measure catalogue quantities for one label using local slices and padded boxes."""
     if label_slice is None:
@@ -196,6 +197,26 @@ def measure_source(
     cy_sub, cx_sub = ndi.center_of_mass(source_mask_global.astype(float))
     cy = cy_sub + y_off
     cx = cx_sub + x_off
+
+    # Determine fallback background and sigma from maps if necessary
+    if isinstance(global_sigma, np.ndarray):
+        iy, ix = int(round(cy)), int(round(cx))
+        sh, sw = global_sigma.shape
+        iy, ix = max(0, min(sh - 1, iy)), max(0, min(sw - 1, ix))
+        sigma_fallback = float(global_sigma[iy, ix])
+    else:
+        sigma_fallback = float(global_sigma)
+
+    if global_background is not None:
+        if isinstance(global_background, np.ndarray):
+            iy, ix = int(round(cy)), int(round(cx))
+            bh, bw = global_background.shape
+            iy, ix = max(0, min(bh - 1, iy)), max(0, min(bw - 1, ix))
+            bkg_fallback = float(global_background[iy, ix])
+        else:
+            bkg_fallback = float(global_background)
+    else:
+        bkg_fallback = float(np.nanmedian(sub_image))
 
     fwhm_px = float(source_attrs.get("fwhm_px", np.nan)) if source_attrs else float("nan")
     parent_components = int(source_attrs.get("parent_components", 1)) if source_attrs else 1
@@ -222,17 +243,29 @@ def measure_source(
     )
     # Flag 8 if >20% rejected or <50 valid
     annulus_flag = 8 if (reject_frac > 0.2 or n_valid < params.min_annulus_valid) else 0
-    bkg_perpix_for_sum = bkg_perpix if np.isfinite(bkg_perpix) else float(np.nanmedian(sub_image))
+    bkg_perpix_for_sum = bkg_perpix if np.isfinite(bkg_perpix) else bkg_fallback
     
     # Aperture sums (local centroid)
     sum_ap, n_ap = aperture_sum(sub_image, cx_sub, cy_sub, params.r_ap_pix)
     flux_counts = sum_ap - bkg_perpix_for_sum * n_ap
-    sigma_used = sigma_local if np.isfinite(sigma_local) else global_sigma
+    sigma_used = sigma_local if np.isfinite(sigma_local) else sigma_fallback
     flux_err = compute_flux_err(n_ap, sigma_used, flux_counts, gain=params.gain)
     snr_ap = flux_counts / flux_err if (np.isfinite(flux_err) and flux_err > 0) else float("nan")
     
     # Magnitudes
     mag, mag_err = compute_magnitude(flux_counts, flux_err, magzpt, magzrr, exptime=params.exptime)
+
+    # 4. Isophotal Photometry
+    n_iso = int(np.sum(source_mask_global))
+    flux_iso = float(np.sum(sub_image[source_mask_global] - bkg_perpix_for_sum))
+    flux_iso_err = compute_flux_err(n_iso, sigma_used, flux_iso, gain=params.gain)
+    mag_iso, mag_iso_err = compute_magnitude(flux_iso, flux_iso_err, magzpt, magzrr, exptime=params.exptime)
+
+    # 5. Model Photometry (Gaussian Fit)
+    flux_model = float(source_attrs.get("flux_model", np.nan)) if source_attrs else float("nan")
+    # For model flux, we approximate error using the same formula but with iso area
+    flux_model_err = compute_flux_err(n_iso, sigma_used, flux_model, gain=params.gain)
+    mag_model, mag_model_err = compute_magnitude(flux_model, flux_model_err, magzpt, magzrr, exptime=params.exptime)
 
     # Multi-aperture 3 and 6 px (local centroid)
     sum_ap3, n_ap3 = aperture_sum(sub_image, cx_sub, cy_sub, 3.0)
@@ -294,6 +327,13 @@ def measure_source(
         "fwhm_pix": fwhm_px,
         "deblend_components": int(parent_components),
         "touches_saturation": bool(touches_saturation),
+        "flux_iso": flux_iso,
+        "flux_iso_err": flux_iso_err,
+        "mag_iso": mag_iso,
+        "mag_iso_err": mag_iso_err,
+        "area_iso": n_iso,
+        "flux_model": flux_model,
+        "flux_model_err": flux_model_err,
+        "mag_model": mag_model,
+        "mag_model_err": mag_model_err,
     }
-
-
